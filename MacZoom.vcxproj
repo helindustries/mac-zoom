@@ -89,7 +89,7 @@
   </ItemDefinitionGroup>
 
   <ItemGroup>
-    <ClCompile Include="src\MacZoom.cpp" />
+    <ClCompile Include="Source\MacZoom.cpp" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
