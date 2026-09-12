@@ -32,7 +32,7 @@ msbuild MacZoom.sln /p:Configuration=Release /p:Platform=x64
 or just open `MacZoom.sln` in Visual Studio 2022.
 
 Requires the MSVC v143 x64 toolset (VS 2022 BuildTools or Professional).
-Output: `buildd\Release\MacZoom.exe` — ~106 KB, static CRT, so no VC++
+Output: `build\x64\Release\MacZoom.exe` — ~106 KB, static CRT, so no VC++
 redistributable is needed on the target machine.
 
 Note `WIN32_LEAN_AND_MEAN` is set project-wide, which means `timeBeginPeriod`
