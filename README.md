@@ -18,8 +18,8 @@ from stepped into continuous.
 
 | | |
 |---|---|
-| `Alt` + Wheel | zoom in / out — multiplicative, ~15% per notch |
-| `Alt` + Middle click | reset to 1.0 |
+| `Ctrl` + Wheel | zoom in / out — multiplicative, ~15% per notch |
+| `Ctrl` + Middle click | reset to 1.0 |
 | Tray double-click | enable / disable |
 | Tray right-click | menu: Enabled, Reset zoom, Exit |
 
@@ -108,7 +108,7 @@ cursor diverge. This is not one.
 
 - **Replaces Windows Magnifier.** Only one fullscreen magnifier can own the
   transform. Do not run both.
-- If an `Alt`+Wheel binding exists in an AutoHotkey script for the Magnifier
+- If a `Ctrl`+Wheel or `Alt`+Wheel binding exists in an AutoHotkey script for the Magnifier
   (`Win`+`NumpadAdd`/`NumpadSub`), remove it or the two will fight.
 - While streaming with Apollo, the virtual display is primary and part of the
   virtual desktop, so the magnified output is what gets captured — the client

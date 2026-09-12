@@ -26,8 +26,8 @@
 //    transforms; this is not one.
 //
 // CONTROLS
-//    Alt + Wheel        zoom in / out (multiplicative, ~15% per notch)
-//    Alt + MiddleClick  reset to 1.0
+//    Ctrl + Wheel        zoom in / out (multiplicative, ~15% per notch)
+//    Ctrl + MiddleClick  reset to 1.0
 //    tray menu          enable/disable, reset, exit
 //
 // The zoom level is EASED toward its target every frame rather than snapped.
@@ -121,7 +121,7 @@ static DWORD WINAPI FrameThread(LPVOID)
 // ---------------------------------------------------------------- mouse hook
 static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
 {
-    if (code == HC_ACTION && g_enabled && (GetAsyncKeyState(VK_MENU) & 0x8000))
+    if (code == HC_ACTION && g_enabled && (GetAsyncKeyState(VK_CONTROL) & 0x8000))
     {
         if (wParam == WM_MOUSEWHEEL)
         {
@@ -147,7 +147,7 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
 // ---------------------------------------------------------------- tray
 static void UpdateTip()
 {
-    wsprintfW(g_nid.szTip, L"MacZoom -- %s (Alt+Wheel)",
+    wsprintfW(g_nid.szTip, L"MacZoom -- %s (Ctrl+Wheel)",
               g_enabled ? L"enabled" : L"disabled");
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
@@ -231,7 +231,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAY;
     g_nid.hIcon  = ico;
-    wsprintfW(g_nid.szTip, L"MacZoom -- enabled (Alt+Wheel)");
+    wsprintfW(g_nid.szTip, L"MacZoom -- enabled (Ctrl+Wheel)");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
     g_hook   = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, hInst, 0);
