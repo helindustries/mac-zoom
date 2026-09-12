@@ -26,8 +26,10 @@
 //    transforms; this is not one.
 //
 // CONTROLS
-//    Ctrl + Wheel        zoom in / out (multiplicative, ~15% per notch)
-//    Ctrl + MiddleClick  reset to 1.0
+//    Win + Wheel         zoom in / out (multiplicative, ~15% per notch)
+//    Win + MiddleClick   reset to 1.0
+//      (Win because the key-name remap makes the Control key emit Win --
+//       see the note at the mouse hook)
 //    tray menu          enable/disable, reset, exit
 //
 // The zoom level is EASED toward its target every frame rather than snapped.
@@ -121,7 +123,21 @@ static DWORD WINAPI FrameThread(LPVOID)
 // ---------------------------------------------------------------- mouse hook
 static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
 {
-    if (code == HC_ACTION && g_enabled && (GetAsyncKeyState(VK_CONTROL) & 0x8000))
+    // WIN, not CTRL -- and that is deliberate. BasicKeySwaps2.ahk maps by key
+    // NAME so the machine matches a Mac: the Control key emits Win, and Command
+    // emits Ctrl. macOS zooms the screen on Control+scroll, so the gesture we
+    // must answer to is the one the Control key now produces, i.e. Win.
+    //
+    // Triggering on VK_CONTROL had it exactly backwards: the Mac gesture did
+    // nothing, while Command+scroll zoomed AND was swallowed below -- silently
+    // stealing browser zoom, which on a Mac is a Command shortcut and must keep
+    // working.
+    //
+    // Consequence worth knowing: without the AHK remap running, this needs a
+    // literal Win+scroll.
+    const bool zoomMod = (GetAsyncKeyState(VK_LWIN) & 0x8000)
+                      || (GetAsyncKeyState(VK_RWIN) & 0x8000);
+    if (code == HC_ACTION && g_enabled && zoomMod)
     {
         if (wParam == WM_MOUSEWHEEL)
         {
@@ -147,7 +163,7 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
 // ---------------------------------------------------------------- tray
 static void UpdateTip()
 {
-    wsprintfW(g_nid.szTip, L"MacZoom -- %s (Ctrl+Wheel)",
+    wsprintfW(g_nid.szTip, L"MacZoom -- %s (Win+Wheel)",
               g_enabled ? L"enabled" : L"disabled");
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
