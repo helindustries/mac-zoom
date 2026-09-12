@@ -1,0 +1,32 @@
+# msbuild output
+build/
+bin/
+obj/
+x64/
+Debug/
+Release/
+*.obj
+*.exe
+*.pdb
+*.idb
+*.ilk
+*.exp
+*.lib
+*.tlog
+*.log
+*.iobj
+*.ipdb
+
+# visual studio
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# editor
+.vscode/
+
+# os
+Thumbs.db
+desktop.ini
