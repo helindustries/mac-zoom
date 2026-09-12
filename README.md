@@ -26,11 +26,17 @@ from stepped into continuous.
 ## Build
 
 ```cmd
-build.cmd
+msbuild MacZoom.sln /p:Configuration=Release /p:Platform=x64
 ```
 
-Requires VS 2022 BuildTools (or Professional) with the MSVC x64 toolset.
-Output is `build\MacZoom.exe`.
+or just open `MacZoom.sln` in Visual Studio 2022.
+
+Requires the MSVC v143 x64 toolset (VS 2022 BuildTools or Professional).
+Output: `buildd\Release\MacZoom.exe` — ~106 KB, static CRT, so no VC++
+redistributable is needed on the target machine.
+
+Note `WIN32_LEAN_AND_MEAN` is set project-wide, which means `timeBeginPeriod`
+is **not** reachable through `windows.h`; `<timeapi.h>` is included explicitly.
 
 ## What was measured, and what it constrains
 
