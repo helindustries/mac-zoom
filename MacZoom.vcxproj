@@ -60,6 +60,19 @@
       <!-- SubSystem Windows: tray app, no console window -->
       <SubSystem>Windows</SubSystem>
       <AdditionalDependencies>magnification.lib;shell32.lib;user32.lib;gdi32.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+
+      <!--
+        No UIAccess. It is NOT required: a minimal PowerShell repro calls
+        MagSetFullscreenTransform successfully from a plain, non-elevated
+        process with no manifest flag at all. The real bug was threading
+        (see FrameThread in MacZoom.cpp).
+
+        Do not set UACUIAccess "just in case": Windows REFUSES TO LAUNCH a
+        uiAccess binary that is not signed and under Program Files, and the
+        failure surfaces as the useless "A referral was returned from the
+        server". That cost an hour.
+      -->
+      <UACExecutionLevel>AsInvoker</UACExecutionLevel>
     </Link>
   </ItemDefinitionGroup>
 
