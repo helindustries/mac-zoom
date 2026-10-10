@@ -10,6 +10,8 @@ on:
 jobs:
   windows:
     runs-on: windows-2022
+    env:
+      BUILD_DIR: build
     steps:
       - uses: actions/checkout@v7
       - name: Inno Setup
@@ -20,11 +22,11 @@ jobs:
           }
       - name: Build and package
         shell: cmd
-        run: Tools\Build.cmd "%GITHUB_WORKSPACE%\build"
+        run: Tools\Build.cmd "%GITHUB_WORKSPACE%\%BUILD_DIR%"
       - uses: actions/upload-artifact@v7
         with:
           name: windows
-          path: build/MacZoom-*-setup.exe
+          path: ${{ env.BUILD_DIR }}/MacZoom-*-setup.exe
           if-no-files-found: error
 
   release:
