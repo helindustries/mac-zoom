@@ -74,6 +74,16 @@
       -->
       <UACExecutionLevel>AsInvoker</UACExecutionLevel>
     </Link>
+    <Manifest>
+      <!--
+        Per-monitor DPI awareness is REQUIRED, not cosmetic. The magnification
+        API works in physical pixels. A DPI-unaware process gets virtualised
+        values from GetSystemMetrics and GetCursorPos (2293 wide instead of
+        3440 at 150 %), so the pan range was computed against a desktop two
+        thirds its real size and the right of the ultrawide was unreachable.
+      -->
+      <EnableDpiAwareness>PerMonitorHighDPIAware</EnableDpiAwareness>
+    </Manifest>
   </ItemDefinitionGroup>
 
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">

@@ -83,9 +83,17 @@ enum TrackMode { TRACK_CONTINUOUS = 0, TRACK_EDGE = 1, TRACK_CENTERED = 2 };
 
 static volatile float g_target  = 1.0f;   // where we want to be
 static volatile float g_current = 1.0f;   // where we are (eased)
-static volatile bool  g_enabled = true;
+static volatile bool  g_enabled = true;   // the user's tray toggle
 static volatile bool  g_running = true;
 static volatile LONG  g_track   = TRACK_CENTERED;
+
+// Suppressed because a stream is running. DELIBERATELY SEPARATE from g_enabled:
+// macOS does its own screen zoom CLIENT-side, before anything reaches Windows,
+// so zooming here as well would zoom twice. Keeping the two flags apart means a
+// stream starting and ending does not silently discard the user's own on/off
+// choice -- exactly the same reasoning as MacKeySwaps.ahk, which suppresses its
+// magnifier bindings while streaming rather than rewriting them.
+static volatile bool  g_streamOff = false;
 
 // ---------------------------------------------------------------- persistence
 static const wchar_t* REG_PATH = L"Software\\MacZoom";
@@ -117,8 +125,98 @@ static void LoadSettings(void)
     }
 }
 
+// ---------------------------------------------------------- stream signalling
+// CONTRACT (shared with MacKeySwaps.ahk and anything else that cares):
+//
+//     HKLM\SOFTWARE\MacParity : StreamActive  REG_DWORD  0 = local, 1 = streaming
+//
+// Apollo's global_prep_cmd writes it from stream-on.cmd / stream-off.cmd with a
+// plain `reg add`, and we subscribe with RegNotifyChangeKeyValue.
+//
+// WHY THIS AND NOT THE OBVIOUS ALTERNATIVES
+// Apollo's prep command runs as SYSTEM in session 0 and exits immediately, so:
+//   * PostMessage(HWND_BROADCAST, ...) cannot reach us -- window broadcasts do
+//     not cross the session boundary, and we live in the interactive session.
+//   * a named Event or Mutex is destroyed when the last handle closes, i.e. the
+//     instant the prep command exits, so it cannot carry state for a whole
+//     stream.
+//   * a fire-and-forget pipe write is LOST if nothing is listening at that
+//     moment, and gives a process starting mid-stream no way to learn the
+//     current state -- a real case when autostart races Apollo at logon.
+//
+// A registry value solves all three: the write is atomic (no torn reads, no
+// sharing violations, no text parsing), the state is durable so a late starter
+// reads the truth, RegNotifyChangeKeyValue is a genuine kernel push rather than
+// a poll, and any number of consumers can subscribe independently.
+#define WM_STREAMSTATE (WM_APP + 2)
+
+// Declared up here rather than with the other handles below, because
+// StreamWatchThread posts to it.
+static HWND g_hwnd = NULL;
+
+static const wchar_t* STATE_KEY = L"SOFTWARE\\MacParity";
+static const wchar_t* STATE_VAL = L"StreamActive";
+
+static HANDLE g_quitEvt   = NULL;   // signalled at teardown to release the watcher
+static HANDLE g_watchThrd = NULL;
+
+static bool ReadStreamActive(void)
+{
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, STATE_KEY, 0, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS)
+        return false;                       // absent => not streaming, the safe default
+
+    DWORD v = 0, sz = sizeof(v), type = 0;
+    LONG  r = RegQueryValueExW(k, STATE_VAL, NULL, &type, (BYTE*)&v, &sz);
+    RegCloseKey(k);
+    return (r == ERROR_SUCCESS && type == REG_DWORD && v != 0);
+}
+
+// Blocks in the kernel until the value changes; no polling anywhere.
+static DWORD WINAPI StreamWatchThread(LPVOID)
+{
+    for (;;)
+    {
+        HKEY k;
+        // KEY_NOTIFY is part of KEY_READ, which every user holds on HKLM\SOFTWARE.
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, STATE_KEY, 0,
+                          KEY_NOTIFY | KEY_QUERY_VALUE, &k) != ERROR_SUCCESS)
+        {
+            // Key not created yet (fresh install, installer not run). Retry
+            // rather than giving up for the lifetime of the process.
+            if (WaitForSingleObject(g_quitEvt, 5000) == WAIT_OBJECT_0) return 0;
+            continue;
+        }
+
+        HANDLE evt = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!evt) { RegCloseKey(k); return 0; }
+        HANDLE h[2] = { evt, g_quitEvt };
+
+        for (;;)
+        {
+            ResetEvent(evt);
+            // Re-arm BEFORE reading, so a change landing between the read and
+            // the next arm is not missed.
+            if (RegNotifyChangeKeyValue(k, FALSE, REG_NOTIFY_CHANGE_LAST_SET, evt, TRUE) != ERROR_SUCCESS)
+                break;
+            if (WaitForMultipleObjects(2, h, FALSE, INFINITE) != WAIT_OBJECT_0)
+            {
+                CloseHandle(evt); RegCloseKey(k);
+                return 0;                   // quit signalled
+            }
+            PostMessageW(g_hwnd, WM_STREAMSTATE, 0, 0);
+        }
+
+        CloseHandle(evt);
+        RegCloseKey(k);
+        if (WaitForSingleObject(g_quitEvt, 1000) == WAIT_OBJECT_0) return 0;
+    }
+}
+
+// Zoom answers the wheel only when the user has it on AND no stream is running.
+static inline bool ZoomOn(void) { return g_enabled && !g_streamOff; }
+
 static HHOOK           g_hook   = NULL;
-static HWND            g_hwnd   = NULL;
 static HANDLE          g_thread = NULL;
 static NOTIFYICONDATAW g_nid    = {};
 
@@ -172,7 +270,7 @@ static DWORD WINAPI FrameThread(LPVOID)
         else                       current  = target;
         g_current = current;
 
-        if (!g_enabled || current <= 1.001f)
+        if (!ZoomOn() || current <= 1.001f)
         {
             MagSetFullscreenTransform(1.0f, 0, 0);
         }
@@ -256,7 +354,9 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
     const bool zoomMod = (GetAsyncKeyState(VK_LWIN) & 0x8000)
                       || (GetAsyncKeyState(VK_RWIN) & 0x8000);
 
-    if (code == HC_ACTION && g_enabled && zoomMod)
+    // ZoomOn(), not g_enabled: while a stream is up the wheel must fall through
+    // to the application underneath, NOT be swallowed by the return 1 below.
+    if (code == HC_ACTION && ZoomOn() && zoomMod)
     {
         if (wParam == WM_MOUSEWHEEL)
         {
@@ -266,8 +366,16 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
             // FlipFlopWheel=1 is set on every pointing device here (macOS
             // "natural" scrolling), so the sign arriving is already inverted
             // relative to a stock Windows box. Pushing the wheel away must zoom
-            // IN, hence delta < 0.
-            float t = g_target * ((delta < 0) ? ZOOM_STEP : (1.0f / ZOOM_STEP));
+            // IN, hence a negative delta zooms in.
+            //
+            // Scale by how far this event scrolled, NOT by how many events
+            // arrived. A wheel notch is WHEEL_DELTA (120) per event, but a
+            // precision touchpad sends a rapid stream of small deltas for one
+            // swipe. Applying a whole ZOOM_STEP per event made touchpad zoom race
+            // while the MX Master felt right. With the exponent, one notch is
+            // still exactly ZOOM_STEP and small deltas contribute their fraction,
+            // so both devices zoom the same amount for the same scroll distance.
+            float t = g_target * powf(ZOOM_STEP, -(float)delta / (float)WHEEL_DELTA);
             if (t < ZOOM_MIN) t = ZOOM_MIN;
             if (t > ZOOM_MAX) t = ZOOM_MAX;
             g_target = t;
@@ -286,8 +394,9 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
 // ---------------------------------------------------------------- tray
 static void UpdateTip()
 {
-    wsprintfW(g_nid.szTip, L"MacZoom -- %s (Win+Wheel)",
-              g_enabled ? L"enabled" : L"disabled");
+    const wchar_t* state = g_streamOff ? L"suppressed (streaming)"
+                                       : (g_enabled ? L"enabled" : L"disabled");
+    wsprintfW(g_nid.szTip, L"MacZoom -- %s (Win+Wheel)", state);
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
@@ -295,7 +404,10 @@ static void ShowMenu(HWND hwnd)
 {
     POINT pt; GetCursorPos(&pt);
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING | (g_enabled ? MF_CHECKED : 0), ID_TOGGLE, L"Enabled");
+    // The tick still reflects the user's own choice while a stream suppresses
+    // it, so ending the stream restores exactly what they had set.
+    AppendMenuW(m, MF_STRING | (g_enabled ? MF_CHECKED : 0), ID_TOGGLE,
+                g_streamOff ? L"Enabled (suppressed while streaming)" : L"Enabled");
     AppendMenuW(m, MF_STRING, ID_RESET, L"Reset zoom");
 
     // Same three behaviours, same order, as macOS System Settings >
@@ -318,10 +430,45 @@ static void ShowMenu(HWND hwnd)
     DestroyMenu(m);
 }
 
+// Explorer broadcasts "TaskbarCreated" whenever it builds the taskbar: at logon,
+// and again after an Explorer crash or restart. Every tray icon is gone at that
+// point and each application must add its own back. MacZoom used to add its icon
+// exactly once at startup, so when a logon task launched it before the taskbar
+// existed the icon was silently lost for the whole session.
+static UINT g_wmTaskbarCreated = 0;
+#define ID_TIMER_TRAY 2
+
+// Adds the tray icon, retrying every 2 s while the shell is not ready. NIM_MODIFY
+// as the fallback treats "icon already present" as success, so a duplicate add
+// cannot leave the retry timer running forever.
+static void AddTrayIcon(HWND hwnd)
+{
+    if (Shell_NotifyIconW(NIM_ADD, &g_nid) || Shell_NotifyIconW(NIM_MODIFY, &g_nid))
+    {
+        KillTimer(hwnd, ID_TIMER_TRAY);
+        UpdateTip();
+    }
+    else
+    {
+        SetTimer(hwnd, ID_TIMER_TRAY, 2000, NULL);
+    }
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    // Registered message ids are not compile-time constants, so this cannot be a case.
+    if (g_wmTaskbarCreated && msg == g_wmTaskbarCreated)
+    {
+        AddTrayIcon(hwnd);
+        return 0;
+    }
+
     switch (msg)
     {
+    case WM_TIMER:
+        if (wp == ID_TIMER_TRAY) AddTrayIcon(hwnd);
+        return 0;
+
     case WM_TRAY:
         if (lp == WM_RBUTTONUP || lp == WM_CONTEXTMENU) ShowMenu(hwnd);
         else if (lp == WM_LBUTTONDBLCLK) { g_enabled = !g_enabled; UpdateTip(); }
@@ -340,6 +487,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ID_EXIT:   DestroyWindow(hwnd); break;
         }
         return 0;
+
+    // Pushed by StreamWatchThread the moment HKLM\SOFTWARE\MacParity changes.
+    // Re-read rather than trusting a payload: the value is the single source of
+    // truth, and coalesced notifications would otherwise be ambiguous.
+    case WM_STREAMSTATE:
+    {
+        bool s = ReadStreamActive();
+        if (s != g_streamOff)
+        {
+            g_streamOff = s;
+            // Collapse immediately when a stream starts, otherwise the Mac
+            // would be magnifying an already-magnified desktop.
+            if (s) g_target = 1.0f;
+            UpdateTip();
+        }
+        return 0;
+    }
 
     // reset the transform on logoff/shutdown too, not just on clean exit
     case WM_ENDSESSION:
@@ -364,6 +528,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
 
     LoadSettings();
 
+    // The mouse hook and the frame loop must keep running while the machine is
+    // loaded: a low-level hook that is starved stalls the pointer for everyone,
+    // and a late MagSetFullscreenTransform leaves the zoom stuck behind it. Task
+    // Scheduler starts its tasks BELOW_NORMAL, and Windows puts a process without
+    // a visible window under EcoQoS (efficiency cores at reduced clock) whenever
+    // it likes; neither is acceptable here, so both are overridden. The transform
+    // itself is carried out by dwm.exe, which Windows already runs at HIGH.
+    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    PROCESS_POWER_THROTTLING_STATE throttling = {};
+    throttling.Version     = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    throttling.StateMask   = 0;
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
+
     // Deliberately NOT calling MagInitialize here. The magnification runtime is
     // per-thread, and FrameThread is the only thread that transforms, so it owns
     // initialisation. Initialising here as well gave two inits in one process
@@ -376,8 +554,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     wc.lpszClassName = L"MacZoomWnd";
     RegisterClassExW(&wc);
 
-    g_hwnd = CreateWindowExW(0, L"MacZoomWnd", L"MacZoom",
-                             0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInst, NULL);
+    // Registered BEFORE the window exists, so the first broadcast is not missed.
+    g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
+    // A hidden top-level tool window, NOT a message-only (HWND_MESSAGE) window.
+    // Message-only windows never receive broadcasts, so neither TaskbarCreated
+    // nor WM_QUERYENDSESSION / WM_ENDSESSION could ever reach the old window -
+    // which also means the "reset the transform on logoff" case in WndProc was
+    // dead code until now. WS_POPUP without WS_VISIBLE is never shown, and
+    // WS_EX_TOOLWINDOW keeps it out of Alt+Tab and the taskbar regardless.
+    g_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"MacZoomWnd", L"MacZoom",
+                             WS_POPUP, 0, 0, 0, 0, NULL, NULL, hInst, NULL);
+
+    // Explorer runs at medium integrity. Should MacZoom ever be started elevated,
+    // UIPI would silently drop the broadcast without this.
+    if (g_wmTaskbarCreated)
+        ChangeWindowMessageFilterEx(g_hwnd, g_wmTaskbarCreated, MSGFLT_ALLOW, NULL);
 
     // borrow Magnifier's own icon so the tray entry is recognisable
     HICON ico = ExtractIconW(hInst, L"C:\\Windows\\System32\\magnify.exe", 0);
@@ -389,8 +581,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAY;
     g_nid.hIcon  = ico;
-    wsprintfW(g_nid.szTip, L"MacZoom -- enabled (Ctrl+Wheel)");
-    Shell_NotifyIconW(NIM_ADD, &g_nid);
+    wsprintfW(g_nid.szTip, L"MacZoom");
+    AddTrayIcon(g_hwnd);   // retries every 2 s until the shell accepts it
+
+    // Read the state BEFORE the hook goes in, so starting mid-stream (autostart
+    // racing Apollo, or a crash-restart) comes up suppressed rather than fighting
+    // the Mac's own zoom for a moment. UpdateTip needs the icon to exist already.
+    g_streamOff = ReadStreamActive();
+    UpdateTip();
+
+    g_quitEvt   = CreateEventW(NULL, TRUE, FALSE, NULL);
+    g_watchThrd = CreateThread(NULL, 0, StreamWatchThread, NULL, 0, NULL);
 
     g_hook   = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, hInst, 0);
     g_thread = CreateThread(NULL, 0, FrameThread, NULL, 0, NULL);
@@ -405,6 +606,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
 
     // teardown: stop the loop, let it reset the transform, then clean up
     g_running = false;
+    // Release the watcher out of its INFINITE wait before joining it.
+    if (g_quitEvt) SetEvent(g_quitEvt);
+    if (g_watchThrd) { WaitForSingleObject(g_watchThrd, 2000); CloseHandle(g_watchThrd); }
+    if (g_quitEvt) CloseHandle(g_quitEvt);
     if (g_thread) { WaitForSingleObject(g_thread, 1000); CloseHandle(g_thread); }
     MagSetFullscreenTransform(1.0f, 0, 0);
     if (g_hook) UnhookWindowsHookEx(g_hook);
