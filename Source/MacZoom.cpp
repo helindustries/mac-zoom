@@ -2,30 +2,11 @@
 //
 // WHY THIS DESIGN (all of it measured on HEIMDALL 2026-09-12, not assumed):
 //
-//  * MagSetFullscreenTransform DOES require UIAccess. This file previously
-//    claimed the opposite and called it "verified". That was wrong, and the
-//    verification described never happened -- it was an assumption written up as
-//    a measurement. Corrected 2026-09-13 after instrumenting every stage:
-//
-//      mouse hook receives the wheel ......... yes
-//      modifier gate opens (lwin=1) .......... yes
-//      frame loop runs, zoom target ramps .... yes
-//      MagInitialize (main AND frame thread).. returns 1
-//      MagSetFullscreenTransform ............. returns 0, ALWAYS
-//
-//    60/60 calls failed, elevated and non-elevated alike, with GetLastError()==0.
-//    Elevation is not UIAccess and does not substitute for it. UIAccess needs all
-//    three of: a uiAccess="true" manifest, an Authenticode signature, and a
-//    secure path (Program Files / System32). This binary has none, so the
-//    fullscreen transform can never apply and this app cannot work as written.
-//
-//    Options, none of them free:
-//      a) sign it, add the manifest, install under Program Files -- means
-//         trusting a self-signed certificate machine-wide;
-//      b) rewrite around MagSetWindowTransform in a fullscreen topmost overlay,
-//         which needs no UIAccess but must exclude itself from what it magnifies;
-//      c) drive Windows Magnifier instead -- it already has UIAccess (signed, in
-//         System32) and supports Ctrl+Alt+Wheel with a configurable increment.
+//  * MagSetFullscreenTransform does NOT require UIAccess. A minimal PowerShell
+//    repro calls it successfully from a plain, non-elevated process with no
+//    manifest flag. The failures once blamed on UIAccess -- 60/60 calls returning
+//    FALSE with GetLastError()==0 -- came from initialising the magnifier on one
+//    thread and transforming on another; see the note on FrameThread.
 //
 //  * Its coordinate space is the VIRTUAL DESKTOP, not the primary monitor.
 //    Verified: with primary = 2560x1080 and virtual = 5120x1600, an xOffset of
@@ -50,7 +31,7 @@
 //    Win + MiddleClick   reset to 1.0
 //      (Win because the key-name remap makes the Control key emit Win --
 //       see the note at the mouse hook)
-//    tray menu          enable/disable, reset, exit
+//    tray menu          enable/disable, reset, follow mouse, follow text cursor, exit
 //
 // The zoom level is EASED toward its target every frame rather than snapped.
 // That easing is the whole point: it is what makes this continuous instead of
@@ -63,6 +44,7 @@
                        // windows.h once WIN32_LEAN_AND_MEAN is defined, which
                        // the vcxproj does define.
 #include <math.h>
+#include <stdlib.h>
 #pragma comment(lib, "magnification.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
@@ -75,6 +57,7 @@
 #define ID_TRACK_CONT 1010
 #define ID_TRACK_EDGE 1011
 #define ID_TRACK_CENT 1012
+#define ID_FOLLOW_TEXT 1020
 
 // How the magnified view follows the pointer. Named and ordered to match macOS
 // System Settings > Accessibility > Zoom > "When zoomed in, the screen image
@@ -86,6 +69,7 @@ static volatile float g_current = 1.0f;   // where we are (eased)
 static volatile bool  g_enabled = true;   // the user's tray toggle
 static volatile bool  g_running = true;
 static volatile LONG  g_track   = TRACK_CENTERED;
+static volatile bool  g_followText = false;   // tray option: follow the text caret while typing
 
 // Suppressed because a stream is running. DELIBERATELY SEPARATE from g_enabled:
 // macOS does its own screen zoom CLIENT-side, before anything reaches Windows,
@@ -106,6 +90,8 @@ static void SaveSettings(void)
     {
         DWORD v = (DWORD)g_track;
         RegSetValueExW(k, L"TrackingMode", 0, REG_DWORD, (const BYTE*)&v, sizeof(v));
+        DWORD text = g_followText ? 1 : 0;
+        RegSetValueExW(k, L"FollowText", 0, REG_DWORD, (const BYTE*)&text, sizeof(text));
         RegCloseKey(k);
     }
 }
@@ -120,6 +106,13 @@ static void LoadSettings(void)
             && type == REG_DWORD && v <= (DWORD)TRACK_CENTERED)
         {
             g_track = (LONG)v;
+        }
+        DWORD text = 0;
+        sz = sizeof(text);
+        if (RegQueryValueExW(k, L"FollowText", NULL, &type, (BYTE*)&text, &sz) == ERROR_SUCCESS
+            && type == REG_DWORD)
+        {
+            g_followText = text != 0;
         }
         RegCloseKey(k);
     }
@@ -225,6 +218,39 @@ static const float ZOOM_MIN  = 1.0f;
 static const float ZOOM_MAX  = 16.0f;
 static const float EASE      = 0.18f;   // fraction of remaining distance per frame
 
+// ---------------------------------------------------------------- text caret
+// "Follow Text Cursor": while typing, the view follows the text caret the way macOS
+// Zoom follows keyboard focus, and moving the pointer hands the view back. The
+// caret is the system caret, which Win32 edit controls and most editors maintain for
+// accessibility tools; its owner reports every move as a caret location change, and
+// the position is read from that thread's GUI state. Applications that draw their
+// own cursor without a system caret are not followed.
+static HWINEVENTHOOK g_caretHook = NULL;
+static volatile bool g_onCaret   = false;    // the view currently follows the caret
+static volatile LONG g_caretX    = 0;        // caret centre, screen coordinates
+static volatile LONG g_caretY    = 0;
+static volatile LONG g_anchorX   = 0;        // pointer position when the caret took over
+static volatile LONG g_anchorY   = 0;
+static const LONG    POINTER_TAKEOVER = 8;   // pixels the pointer must move to take the view back
+
+static void CALLBACK CaretProc(HWINEVENTHOOK, DWORD, HWND, LONG idObject, LONG, DWORD thread, DWORD)
+{
+    if (idObject != OBJID_CARET || !g_followText || !ZoomOn()) return;
+
+    GUITHREADINFO gti = {};
+    gti.cbSize = sizeof(gti);
+    if (GetGUIThreadInfo(thread, &gti) && gti.hwndCaret && gti.rcCaret.bottom > gti.rcCaret.top)
+    {
+        POINT c = { (gti.rcCaret.left + gti.rcCaret.right) / 2,
+                    (gti.rcCaret.top + gti.rcCaret.bottom) / 2 };
+        ClientToScreen(gti.hwndCaret, &c);
+        POINT p; GetCursorPos(&p);
+        g_caretX  = c.x;  g_caretY  = c.y;
+        g_anchorX = p.x;  g_anchorY = p.y;
+        g_onCaret = true;
+    }
+}
+
 // ---------------------------------------------------------------- frame loop
 static DWORD WINAPI FrameThread(LPVOID)
 {
@@ -282,6 +308,7 @@ static DWORD WINAPI FrameThread(LPVOID)
             int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
             POINT p; GetCursorPos(&p);
+            if (g_onCaret) { p.x = g_caretX; p.y = g_caretY; }   // every tracking mode follows it
 
             // viewport size in unmagnified coords
             float w = vw / current;
@@ -354,6 +381,16 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
     const bool zoomMod = (GetAsyncKeyState(VK_LWIN) & 0x8000)
                       || (GetAsyncKeyState(VK_RWIN) & 0x8000);
 
+    // The pointer takes the view back from the text caret once it has really
+    // moved, not on the jitter of a hand resting on the mouse.
+    if (code == HC_ACTION && wParam == WM_MOUSEMOVE && g_onCaret)
+    {
+        const MSLLHOOKSTRUCT* ms = (const MSLLHOOKSTRUCT*)lParam;
+        if (labs(ms->pt.x - g_anchorX) > POINTER_TAKEOVER
+            || labs(ms->pt.y - g_anchorY) > POINTER_TAKEOVER)
+            g_onCaret = false;
+    }
+
     // ZoomOn(), not g_enabled: while a stream is up the wheel must fall through
     // to the application underneath, NOT be swallowed by the return 1 below.
     if (code == HC_ACTION && ZoomOn() && zoomMod)
@@ -421,6 +458,8 @@ static void ShowMenu(HWND hwnd)
     AppendMenuW(track, MF_STRING | (g_track == TRACK_CENTERED ? MF_CHECKED : 0),
                 ID_TRACK_CENT, L"Centered on pointer");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)track, L"Follow Mouse");
+    AppendMenuW(m, MF_STRING | (g_followText ? MF_CHECKED : 0), ID_FOLLOW_TEXT,
+                L"Follow Text Cursor");
 
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
@@ -484,6 +523,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ID_TRACK_CONT: g_track = TRACK_CONTINUOUS; SaveSettings(); break;
         case ID_TRACK_EDGE: g_track = TRACK_EDGE;       SaveSettings(); break;
         case ID_TRACK_CENT: g_track = TRACK_CENTERED;   SaveSettings(); break;
+        case ID_FOLLOW_TEXT:
+            g_followText = !g_followText;
+            if (!g_followText) g_onCaret = false;
+            SaveSettings();
+            break;
         case ID_EXIT:   DestroyWindow(hwnd); break;
         }
         return 0;
@@ -594,6 +638,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     g_watchThrd = CreateThread(NULL, 0, StreamWatchThread, NULL, 0, NULL);
 
     g_hook   = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, hInst, 0);
+    // Out of context, so nothing is injected into other processes: the callback
+    // runs on this thread, from the message loop below.
+    g_caretHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
+                                  NULL, CaretProc, 0, 0,
+                                  WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     g_thread = CreateThread(NULL, 0, FrameThread, NULL, 0, NULL);
     if (g_thread) SetThreadPriority(g_thread, THREAD_PRIORITY_ABOVE_NORMAL);
 
@@ -613,6 +662,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     if (g_thread) { WaitForSingleObject(g_thread, 1000); CloseHandle(g_thread); }
     MagSetFullscreenTransform(1.0f, 0, 0);
     if (g_hook) UnhookWindowsHookEx(g_hook);
+    if (g_caretHook) UnhookWinEvent(g_caretHook);
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
     if (mtx) { ReleaseMutex(mtx); CloseHandle(mtx); }
     return 0;

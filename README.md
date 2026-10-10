@@ -18,17 +18,29 @@ from stepped into continuous.
 
 | | |
 |---|---|
-| `Ctrl` + Wheel | zoom in / out — multiplicative, ~15% per notch |
-| `Ctrl` + Middle click | reset to 1.0 |
+| `Win` + Wheel | zoom in / out — multiplicative, ~9% per notch |
+| `Win` + Middle click | reset to 1.0 |
 | Tray double-click | enable / disable |
-| Tray right-click | menu: Enabled, Reset zoom, Exit |
+| Tray right-click | menu: Enabled, Reset zoom, Follow Mouse, Follow Text Cursor, Exit |
+
+`Win` is used instead of `Ctrl` because on a Mac keyboard remapped to match macOS, the
+Control key sends Win, and macOS zooms on Control + scroll. `Ctrl` + Wheel remains with the
+application underneath, where browsers use it for page zoom.
+
+**Follow Mouse** determines how the view moves with the pointer: continuously, only at the
+edges, or centered on it — the same three choices as macOS. **Follow Text Cursor** makes the
+view follow the text cursor while you type, and the pointer takes over again as soon as it
+moves. It follows the system caret, which standard Windows text fields and most editors
+provide; applications that draw their own cursor without one are not followed.
 
 ## Install
 
 Download `MacZoom-<version>-windows-x64-setup.exe` from the
-[releases page](https://github.com/helindustries/mac-zoom/releases) and run it. It installs
-for the current user only and asks for no administrator rights, since MacZoom needs none.
-Setup can also start MacZoom when you sign in.
+[releases page](https://github.com/helindustries/mac-zoom/releases) and run it. Setup asks
+for administrator rights to give MacZoom high CPU priority, and to ensure the Desktop Window
+Manager, which draws the zoom, keeps its own. This way the zoom does not stall when the
+machine is busy. MacZoom itself still runs without administrator rights. Setup can also
+start it whenever someone signs in.
 
 The installer is not code-signed yet, so SmartScreen may warn about it (More info, Run
 anyway).
@@ -116,7 +128,7 @@ cursor diverge. This is not one.
 
 ## Implementation notes
 
-- **Easing** (`EASE = 0.25`, ~120 Hz) is the feature. Snapping `current` straight
+- **Easing** (`EASE = 0.18`, ~120 Hz) is the feature. Snapping `current` straight
   to `target` would reproduce Magnifier's stepping exactly.
 - `timeBeginPeriod(1)` is set for the frame loop — without it `Sleep(8)` drifts to
   ~15 ms and the motion visibly stutters.
