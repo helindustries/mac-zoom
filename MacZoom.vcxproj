@@ -114,6 +114,10 @@
   <ItemGroup>
     <ClCompile Include="Source\MacZoom.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Source\Version.h" />
+    <ResourceCompile Include="Source\MacZoom.rc" />
+  </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

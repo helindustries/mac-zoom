@@ -23,13 +23,37 @@ from stepped into continuous.
 | Tray double-click | enable / disable |
 | Tray right-click | menu: Enabled, Reset zoom, Exit |
 
+## Install
+
+Download `MacZoom-<version>-windows-x64-setup.exe` from the
+[releases page](https://github.com/helindustries/mac-zoom/releases) and run it. It installs
+for the current user only and asks for no administrator rights, since MacZoom needs none.
+Setup can also start MacZoom when you sign in.
+
+The installer is not code-signed yet, so SmartScreen may warn about it (More info, Run
+anyway).
+
+Setup and the uninstaller ask a running MacZoom to quit before they replace or remove it,
+so the zoom is always reset first. If it does not quit within five seconds, they stop and
+tell you to choose Exit from its tray icon.
+
 ## Build
 
 ```cmd
-msbuild MacZoom.sln /p:Configuration=Release /p:Platform=x64
+Tools\Build.cmd
 ```
 
-or just open `MacZoom.sln` in Visual Studio 2022.
+It finds MSBuild through `vswhere`, builds the Release x64 configuration and packages the
+installer with Inno Setup 6, both into `build\`. Set `ISCC` if the Inno Setup compiler is
+not in its default place. The version lives in `Source\Version.h`; the executable carries
+it, and the installer reads it from there.
+
+GitHub Actions runs the same script on every push. Pushing a `v*` tag publishes the
+installer as a release.
+
+To build without the installer, run
+`msbuild MacZoom.sln /p:Configuration=Release /p:Platform=x64` or open `MacZoom.sln` in
+Visual Studio 2022.
 
 Requires the MSVC v143 x64 toolset (VS 2022 BuildTools or Professional).
 Output: `build\x64\Release\MacZoom.exe` — ~106 KB, static CRT, so no VC++

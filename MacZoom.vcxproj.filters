@@ -10,5 +10,11 @@
     <ClCompile Include="Source\MacZoom.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClInclude Include="Source\Version.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ResourceCompile Include="Source\MacZoom.rc">
+      <Filter>Source Files</Filter>
+    </ResourceCompile>
   </ItemGroup>
 </Project>
