@@ -44,9 +44,15 @@
             Label="LocalAppDataPlatform" />
   </ImportGroup>
 
+  <!--
+    Build output goes beside the checkout, never into it. BuildRoot can be passed in
+    (Tools\Build.cmd and CI do); it carries no trailing backslash, because one in a
+    quoted /p: argument would escape the closing quote.
+  -->
   <PropertyGroup>
-    <OutDir>$(SolutionDir)build\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)build\obj\$(Platform)\$(Configuration)\</IntDir>
+    <BuildRoot Condition="'$(BuildRoot)'==''">$(MSBuildProjectDirectory)\..\Build\Windows</BuildRoot>
+    <OutDir>$(BuildRoot)\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(BuildRoot)\obj\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
 
   <ItemDefinitionGroup>

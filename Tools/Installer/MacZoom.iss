@@ -3,7 +3,10 @@
 #define AppName "MacZoom"
 #define AppExe "MacZoom.exe"
 #define RootDir AddBackslash(SourcePath) + "..\.."
-#define BuildDir RootDir + "\build\x64\Release"
+#ifndef BuildRoot
+  #define BuildRoot RootDir + "\..\Build\Windows"
+#endif
+#define BuildDir BuildRoot + "\x64\Release"
 #define AppVersion GetStringFileInfo(BuildDir + "\" + AppExe, "ProductVersion")
 #define Ifeo "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
 
@@ -21,7 +24,7 @@ ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 MinVersion=10.0
 LicenseFile={#RootDir}\LICENSE
-OutputDir={#RootDir}\build
+OutputDir={#BuildRoot}
 OutputBaseFilename={#AppName}-{#AppVersion}-windows-x64-setup
 UninstallDisplayIcon={app}\{#AppExe}
 Compression=lzma2

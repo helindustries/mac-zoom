@@ -1,9 +1,11 @@
 @echo off
-rem Builds MacZoom with MSBuild and packages the Inno Setup installer into build\.
-rem Usage: Tools\Build.cmd
+rem Builds MacZoom with MSBuild and packages the Inno Setup installer into the build directory.
+rem Usage: Tools\Build.cmd [BuildDir]   (default: ..\Build\Windows beside this checkout)
 rem   ISCC  the Inno Setup compiler (default: Inno Setup 6 under Program Files (x86))
 setlocal
 set "SOURCE=%~dp0.."
+set "BUILD=%~1"
+if "%BUILD%"=="" set "BUILD=%~dp0..\..\Build\Windows"
 if "%ISCC%"=="" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 
@@ -17,5 +19,5 @@ if not exist "%ISCC%" (
     exit /b 3
 )
 
-"%MSBUILD%" "%SOURCE%\MacZoom.sln" /m /nologo /v:minimal /p:Configuration=Release /p:Platform=x64 || exit /b 1
-"%ISCC%" /Q "%SOURCE%\Tools\Installer\MacZoom.iss" || exit /b 1
+"%MSBUILD%" "%SOURCE%\MacZoom.sln" /m /nologo /v:minimal /p:Configuration=Release /p:Platform=x64 "/p:BuildRoot=%BUILD%" || exit /b 1
+"%ISCC%" /Q "/DBuildRoot=%BUILD%" "%SOURCE%\Tools\Installer\MacZoom.iss" || exit /b 1

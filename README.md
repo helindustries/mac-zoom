@@ -63,8 +63,9 @@ Tools\Build.cmd
 ```
 
 It finds MSBuild through `vswhere`, builds the Release x64 configuration and packages the
-installer with Inno Setup 6, both into `build\`. Set `ISCC` if the Inno Setup compiler is
-not in its default place. The version lives in `Source\Version.h`; the executable carries
+installer with Inno Setup 6, both into `..\Build\Windows` beside the checkout, or into the
+directory given as its argument. Set `ISCC` if the Inno Setup compiler is not in its
+default place. The version lives in `Source\Version.h`; the executable carries
 it, and the installer reads it from there.
 
 GitHub Actions runs the same script on every push. Pushing a `v*` tag publishes the
@@ -75,7 +76,7 @@ To build without the installer, run
 Visual Studio 2022.
 
 Requires the MSVC v143 x64 toolset (VS 2022 BuildTools or Professional).
-Output: `build\x64\Release\MacZoom.exe` — ~106 KB, static CRT, so no VC++
+Output: `..\Build\Windows\x64\Release\MacZoom.exe` — ~120 KB, static CRT, so no VC++
 redistributable is needed on the target machine.
 
 Note `WIN32_LEAN_AND_MEAN` is set project-wide, which means `timeBeginPeriod`

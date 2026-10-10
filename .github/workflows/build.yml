@@ -20,7 +20,7 @@ jobs:
           }
       - name: Build and package
         shell: cmd
-        run: Tools\Build.cmd
+        run: Tools\Build.cmd "%GITHUB_WORKSPACE%\build"
       - uses: actions/upload-artifact@v7
         with:
           name: windows
