@@ -34,6 +34,7 @@ CloseApplications=no
 
 [Tasks]
 Name: autostart; Description: "Start {#AppName} when someone signs in"
+Name: javabridge; Description: "Follow the text cursor in Java applications too (switches on the Java Access Bridge; restart running Java applications)"
 
 [Files]
 Source: "{#BuildDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
@@ -105,4 +106,18 @@ begin
     Result := CloseRunningCopy();
     if not Result then
         MsgBox('{#AppName} is still running and did not quit when asked. Choose Exit from its tray icon, then uninstall again.', mbError, MB_OK);
+end;
+
+#include "JavaBridge.iss"
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+    if (CurStep = ssPostInstall) and WizardIsTaskSelected('javabridge') then
+        EnableJavaBridge();
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+    if CurUninstallStep = usPostUninstall then
+        DisableJavaBridge();
 end;
