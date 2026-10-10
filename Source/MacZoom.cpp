@@ -46,6 +46,8 @@
                        // the vcxproj does define.
 #include <math.h>
 #include <stdlib.h>
+#include <string>
+#include <vector>
 #include <ole2.h>          // COM, for UI Automation; WIN32_LEAN_AND_MEAN leaves it out
 #include <oleacc.h>
 #include <uiautomation.h>
@@ -112,6 +114,41 @@ static volatile bool  g_streamOff = false;
 // ---------------------------------------------------------------- persistence
 static const wchar_t* REG_PATH = L"Software\\MacZoom";
 
+static DWORD ReadSetting(const wchar_t* name, DWORD fallback)
+{
+    DWORD value = fallback, size = sizeof(value), type = 0;
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_PATH, 0, KEY_QUERY_VALUE, &k) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(k, name, NULL, &type, (BYTE*)&value, &size) != ERROR_SUCCESS
+            || type != REG_DWORD)
+            value = fallback;
+        RegCloseKey(k);
+    }
+    return value;
+}
+
+static void WriteSetting(const wchar_t* name, DWORD value)
+{
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_PATH, 0, NULL, 0, KEY_SET_VALUE, NULL, &k, NULL)
+        == ERROR_SUCCESS)
+    {
+        RegSetValueExW(k, name, 0, REG_DWORD, (const BYTE*)&value, sizeof(value));
+        RegCloseKey(k);
+    }
+}
+
+static void DeleteSetting(const wchar_t* name)
+{
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_PATH, 0, KEY_SET_VALUE, &k) == ERROR_SUCCESS)
+    {
+        RegDeleteValueW(k, name);
+        RegCloseKey(k);
+    }
+}
+
 static void SaveSettings(void)
 {
     HKEY k;
@@ -155,6 +192,157 @@ static void LoadSettings(void)
         }
         RegCloseKey(k);
     }
+}
+
+// ---------------------------------------------------------- Java Access Bridge switch
+// Java applications report nothing to MacZoom until the Java Access Bridge is on for the
+// user, in the .accessibility.properties every Java runtime reads at start-up -- the file
+// jabswitch -enable writes. Setup asks for it (--java-bridge on, which sets JavaBridge), and
+// MacZoom checks it again at every start, so a Java application installed since, or an edit
+// that dropped the entry, is caught up with. Each change made is recorded in
+// JavaBridgeChanges, so --java-bridge off, run by the uninstaller, takes back exactly those
+// and leaves whatever a screen reader or the user had set.
+static const char* JAB_ENTRY        = "com.sun.java.accessibility.AccessBridge";
+static const char* JAB_TECHNOLOGIES = "assistive_technologies=";
+static const char* JAB_MAGNIFIER    = "screen_magnifier_present=true";
+enum JavaBridgeChange { JAB_CREATED = 1, JAB_ADDED_TECH = 2, JAB_APPENDED = 4, JAB_ADDED_MAGNIFIER = 8 };
+
+static std::wstring PropertiesPath(void)
+{
+    wchar_t profile[MAX_PATH] = L"";
+    GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
+    return std::wstring(profile) + L"\\.accessibility.properties";
+}
+
+static std::string TrimLine(const std::string& line)
+{
+    const size_t first = line.find_first_not_of(" \t");
+    const size_t last  = line.find_last_not_of(" \t");
+    return first == std::string::npos ? std::string() : line.substr(first, last - first + 1);
+}
+
+// The file's lines without their breaks; false when it exists but cannot be read.
+static bool ReadLines(const std::wstring& path, std::vector<std::string>& lines, bool& existed)
+{
+    bool ok = true;
+    existed = false;
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f != INVALID_HANDLE_VALUE)
+    {
+        existed = true;
+        std::string text;
+        char buffer[4096];
+        DWORD got = 0;
+        while ((ok = ReadFile(f, buffer, sizeof(buffer), &got, NULL) != FALSE) && got > 0)
+            text.append(buffer, got);
+        CloseHandle(f);
+        for (size_t start = 0; start < text.size();)
+        {
+            size_t end = text.find('\n', start);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(start, end - start);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+            start = end + 1;
+        }
+    }
+    else
+    {
+        const DWORD error = GetLastError();
+        ok = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    return ok;
+}
+
+static bool WriteLines(const std::wstring& path, const std::vector<std::string>& lines)
+{
+    std::string text;
+    for (const auto& line : lines) text += line + "\r\n";
+    bool ok = false;
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE)
+    {
+        DWORD written = 0;
+        ok = WriteFile(f, text.data(), (DWORD)text.size(), &written, NULL) && written == text.size();
+        CloseHandle(f);
+    }
+    return ok;
+}
+
+static bool EnableJavaBridge(void)
+{
+    const std::wstring path = PropertiesPath();
+    std::vector<std::string> lines;
+    bool existed = false;
+    bool ok = ReadLines(path, lines, existed);
+    if (ok)
+    {
+        DWORD changes = existed ? 0 : JAB_CREATED;
+        bool hasTechnologies = false, hasMagnifier = false;
+        for (auto& line : lines)
+        {
+            const std::string trimmed = TrimLine(line);
+            if (trimmed.rfind(JAB_TECHNOLOGIES, 0) == 0)
+            {
+                hasTechnologies = true;
+                if (trimmed.find(JAB_ENTRY) == std::string::npos)
+                {
+                    line = trimmed + "," + JAB_ENTRY;
+                    changes |= JAB_APPENDED;
+                }
+            }
+            if (trimmed == JAB_MAGNIFIER) hasMagnifier = true;
+        }
+        if (!hasTechnologies)
+        {
+            lines.push_back(std::string(JAB_TECHNOLOGIES) + JAB_ENTRY);
+            changes |= JAB_ADDED_TECH;
+        }
+        if (!hasMagnifier)
+        {
+            lines.push_back(JAB_MAGNIFIER);
+            changes |= JAB_ADDED_MAGNIFIER;
+        }
+        // Already on: nothing written and nothing recorded, so switching off leaves it on.
+        if (changes & ~JAB_CREATED)
+        {
+            ok = WriteLines(path, lines);
+            if (ok) WriteSetting(L"JavaBridgeChanges", ReadSetting(L"JavaBridgeChanges", 0) | changes);
+        }
+    }
+    return ok;
+}
+
+static bool DisableJavaBridge(void)
+{
+    const DWORD changes = ReadSetting(L"JavaBridgeChanges", 0);
+    bool ok = true;
+    if (changes != 0)
+    {
+        const std::wstring path = PropertiesPath();
+        const std::string appended = std::string(",") + JAB_ENTRY;
+        std::vector<std::string> lines, kept;
+        bool existed = false;
+        ok = ReadLines(path, lines, existed);
+        if (ok && existed)
+        {
+            for (auto line : lines)
+            {
+                const std::string trimmed = TrimLine(line);
+                if ((changes & JAB_APPENDED) && trimmed.rfind(JAB_TECHNOLOGIES, 0) == 0)
+                    if (const size_t at = line.find(appended); at != std::string::npos)
+                        line.erase(at, appended.size());
+                const bool ours = ((changes & JAB_ADDED_TECH)
+                                   && trimmed == std::string(JAB_TECHNOLOGIES) + JAB_ENTRY)
+                               || ((changes & JAB_ADDED_MAGNIFIER) && trimmed == JAB_MAGNIFIER);
+                if (!ours) kept.push_back(line);
+            }
+            ok = ((changes & JAB_CREATED) && kept.empty()) ? DeleteFileW(path.c_str()) != FALSE
+                                                           : WriteLines(path, kept);
+        }
+        if (ok) DeleteSetting(L"JavaBridgeChanges");
+    }
+    return ok;
 }
 
 // ---------------------------------------------------------- stream signalling
@@ -835,6 +1023,16 @@ static void ShowMenu(HWND hwnd)
     DestroyMenu(m);
 }
 
+static void ShowBalloon(const wchar_t* text)
+{
+    g_nid.uFlags |= NIF_INFO;
+    g_nid.dwInfoFlags = NIIF_WARNING;
+    lstrcpynW(g_nid.szInfoTitle, L"MacZoom", ARRAYSIZE(g_nid.szInfoTitle));
+    lstrcpynW(g_nid.szInfo, text, ARRAYSIZE(g_nid.szInfo));
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+    g_nid.uFlags &= ~NIF_INFO;
+}
+
 // Explorer broadcasts "TaskbarCreated" whenever it builds the taskbar: at logon,
 // and again after an Explorer crash or restart. Every tray icon is gone at that
 // point and each application must add its own back. MacZoom used to add its icon
@@ -954,8 +1152,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 // ---------------------------------------------------------------- entry
-int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR cmdLine, int)
 {
+    // Run by Setup and the uninstaller, as the user and beside any running copy, so ahead of
+    // the single-instance check: switch the Java Access Bridge on or off, then exit.
+    if (wcsstr(cmdLine, L"--java-bridge on"))
+    {
+        WriteSetting(L"JavaBridge", 1);
+        return EnableJavaBridge() ? 0 : 1;
+    }
+    if (wcsstr(cmdLine, L"--java-bridge off"))
+    {
+        WriteSetting(L"JavaBridge", 0);
+        return DisableJavaBridge() ? 0 : 1;
+    }
+
     // single instance
     HANDLE mtx = CreateMutexW(NULL, TRUE, L"MacZoom_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
@@ -1024,6 +1235,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     // the Mac's own zoom for a moment. UpdateTip needs the icon to exist already.
     g_streamOff = ReadStreamActive();
     UpdateTip();
+
+    if (ReadSetting(L"JavaBridge", 0) && !EnableJavaBridge())
+    {
+        ShowBalloon(L"Could not switch on the Java Access Bridge in your .accessibility.properties, "
+                    L"so Java applications will not report their text cursor.");
+    }
 
     g_quitEvt   = CreateEventW(NULL, TRUE, FALSE, NULL);
     g_watchThrd = CreateThread(NULL, 0, StreamWatchThread, NULL, 0, NULL);

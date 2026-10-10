@@ -57,7 +57,13 @@ Root: HKLM; Subkey: "{#Ifeo}\dwm.exe"; Flags: uninsdeletekeyifempty; Check: DwmP
 Root: HKLM; Subkey: "{#Ifeo}\dwm.exe\PerfOptions"; ValueType: dword; ValueName: "CpuPriorityClass"; ValueData: 3; Flags: uninsdeletevalue uninsdeletekeyifempty; Check: DwmPriorityUnset
 
 [Run]
+; The bridge is per user, so these run as the user, not as the elevated Setup.
+Filename: "{app}\{#AppExe}"; Parameters: "--java-bridge on"; Tasks: javabridge; Flags: runhidden waituntilterminated runasoriginaluser
+Filename: "{app}\{#AppExe}"; Parameters: "--java-bridge off"; Tasks: not javabridge; Flags: runhidden waituntilterminated runasoriginaluser
 Filename: "{app}\{#AppExe}"; Description: "Start {#AppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+
+[UninstallRun]
+Filename: "{app}\{#AppExe}"; Parameters: "--java-bridge off"; Flags: runhidden waituntilterminated; RunOnceId: "JavaBridgeOff"
 
 [Code]
 // A running copy must be asked to quit, never killed: only its own teardown resets the
@@ -106,18 +112,4 @@ begin
     Result := CloseRunningCopy();
     if not Result then
         MsgBox('{#AppName} is still running and did not quit when asked. Choose Exit from its tray icon, then uninstall again.', mbError, MB_OK);
-end;
-
-#include "JavaBridge.iss"
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-    if (CurStep = ssPostInstall) and WizardIsTaskSelected('javabridge') then
-        EnableJavaBridge();
-end;
-
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-begin
-    if CurUninstallStep = usPostUninstall then
-        DisableJavaBridge();
 end;

@@ -33,10 +33,11 @@ view follow the text cursor while you type, and the pointer takes over again as 
 moves. It reads the cursor wherever Windows reports it: the system caret of classic text
 fields, UI Automation for current applications and browsers, and the Java Access Bridge for
 Java applications such as the JetBrains IDEs. Java reports nothing until the bridge is
-switched on for the user. Setup does that unless its Java task is unticked, and uninstalling
-switches it off again only if setup was what switched it on. Java applications already
-running need a restart. Without the installer, run `jabswitch -enable` from the
-application's Java runtime.
+switched on for the user. Setup does that unless its Java task is unticked, and MacZoom
+checks it again at every start, so a Java application installed later, or an edit that
+dropped the setting, is covered too. Uninstalling switches the bridge off again only where
+MacZoom switched it on. Java applications already running need a restart. Without the
+installer, run `MacZoom.exe --java-bridge on` once.
 
 **Zoom Keys** defines which modifier combination activates zooming via the wheel: Ctrl,
 Win, Alt and Shift can each be toggled individually. The selected combination must be held
