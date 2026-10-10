@@ -18,10 +18,10 @@ from stepped into continuous.
 
 | | |
 |---|---|
-| `Win` + Wheel | zoom in / out — multiplicative, ~9% per notch |
+| `Win` + Wheel | zoom in / out — multiplicative, 9% per notch by default (Zoom Step) |
 | `Win` + Middle click | reset to 1.0 |
 | Tray double-click | enable / disable |
-| Tray right-click | menu: Enabled, Reset zoom, Follow Mouse, Follow Text Cursor, Zoom Keys, Exit |
+| Tray right-click | menu: Enabled, Reset zoom, Follow Mouse, Follow Text Cursor, Zoom Keys, Zoom Step, Exit |
 
 `Win` is used instead of `Ctrl` because on a Mac keyboard remapped to match macOS, the
 Control key sends Win, and macOS zooms on Control + scroll. `Ctrl` + Wheel remains with the

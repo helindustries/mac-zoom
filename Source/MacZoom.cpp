@@ -71,6 +71,7 @@
 #define ID_KEY_WIN   1031
 #define ID_KEY_ALT   1032
 #define ID_KEY_SHIFT 1033
+#define ID_STEP_FIRST 1040   // one id per entry of ZOOM_STEPS, in order
 
 // How the magnified view follows the pointer. Named and ordered to match macOS
 // System Settings > Accessibility > Zoom > "When zoomed in, the screen image
@@ -95,6 +96,12 @@ static const struct { LONG key; UINT id; const wchar_t* name; } ZOOM_KEYS[] = {
     { KEY_ALT,   ID_KEY_ALT,   L"Alt"   },
     { KEY_SHIFT, ID_KEY_SHIFT, L"Shift" },
 };
+
+// Zoom per wheel notch, in percent: a tray setting (Zoom Step), 9 by default (15 was too
+// coarse). Any value up to MAX_ZOOM_STEP set in the registry is honoured; the menu offers these.
+static volatile LONG g_zoomStep    = 9;
+static const LONG    ZOOM_STEPS[]  = { 5, 8, 9, 12, 15 };
+static const LONG    MAX_ZOOM_STEP = 50;
 
 // Shift never on its own: applications use Shift+Wheel for horizontal scrolling.
 static inline bool ZoomKeysValid(LONG keys)
@@ -161,6 +168,8 @@ static void SaveSettings(void)
         RegSetValueExW(k, L"FollowText", 0, REG_DWORD, (const BYTE*)&text, sizeof(text));
         DWORD keys = (DWORD)g_zoomKeys;
         RegSetValueExW(k, L"ZoomKeys", 0, REG_DWORD, (const BYTE*)&keys, sizeof(keys));
+        DWORD step = (DWORD)g_zoomStep;
+        RegSetValueExW(k, L"ZoomStepPercent", 0, REG_DWORD, (const BYTE*)&step, sizeof(step));
         RegCloseKey(k);
     }
 }
@@ -189,6 +198,13 @@ static void LoadSettings(void)
             && type == REG_DWORD && ZoomKeysValid((LONG)keys))
         {
             g_zoomKeys = (LONG)keys;
+        }
+        DWORD step = 0;
+        sz = sizeof(step);
+        if (RegQueryValueExW(k, L"ZoomStepPercent", NULL, &type, (BYTE*)&step, &sz) == ERROR_SUCCESS
+            && type == REG_DWORD && step >= 1 && step <= (DWORD)MAX_ZOOM_STEP)
+        {
+            g_zoomStep = (LONG)step;
         }
         RegCloseKey(k);
     }
@@ -441,7 +457,6 @@ static HHOOK           g_hook   = NULL;
 static HANDLE          g_thread = NULL;
 static NOTIFYICONDATAW g_nid    = {};
 
-static const float ZOOM_STEP = 1.09f;   // per wheel notch (was 1.15: too coarse)
 static const float ZOOM_MIN  = 1.0f;
 static const float ZOOM_MAX  = 16.0f;
 static const float EASE      = 0.18f;   // fraction of remaining distance per frame
@@ -949,11 +964,12 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
             // Scale by how far this event scrolled, NOT by how many events
             // arrived. A wheel notch is WHEEL_DELTA (120) per event, but a
             // precision touchpad sends a rapid stream of small deltas for one
-            // swipe. Applying a whole ZOOM_STEP per event made touchpad zoom race
+            // swipe. Applying a whole zoom step per event made touchpad zoom race
             // while the MX Master felt right. With the exponent, one notch is
-            // still exactly ZOOM_STEP and small deltas contribute their fraction,
+            // still exactly one step and small deltas contribute their fraction,
             // so both devices zoom the same amount for the same scroll distance.
-            float t = g_target * powf(ZOOM_STEP, -(float)delta / (float)WHEEL_DELTA);
+            const float step = 1.0f + g_zoomStep / 100.0f;
+            float t = g_target * powf(step, -(float)delta / (float)WHEEL_DELTA);
             if (t < ZOOM_MIN) t = ZOOM_MIN;
             if (t > ZOOM_MAX) t = ZOOM_MAX;
             g_target = t;
@@ -1014,6 +1030,16 @@ static void ShowMenu(HWND hwnd)
                               | (ZoomKeysValid(g_zoomKeys ^ item.key) ? 0 : MF_GRAYED),
                     item.id, item.name);
     AppendMenuW(m, MF_POPUP, (UINT_PTR)keys, L"Zoom Keys");
+
+    HMENU steps = CreatePopupMenu();
+    for (UINT i = 0; i < ARRAYSIZE(ZOOM_STEPS); ++i)
+    {
+        wchar_t label[16];
+        wsprintfW(label, L"%ld%%", ZOOM_STEPS[i]);
+        AppendMenuW(steps, MF_STRING | (g_zoomStep == ZOOM_STEPS[i] ? MF_CHECKED : 0),
+                    ID_STEP_FIRST + i, label);
+    }
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)steps, L"Zoom Step");
 
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
@@ -1100,6 +1126,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     SaveSettings();
                     UpdateTip();
                 }
+            break;
+        default:
+            if (LOWORD(wp) >= ID_STEP_FIRST && LOWORD(wp) < ID_STEP_FIRST + ARRAYSIZE(ZOOM_STEPS))
+            {
+                g_zoomStep = ZOOM_STEPS[LOWORD(wp) - ID_STEP_FIRST];
+                SaveSettings();
+            }
             break;
         case ID_EXIT:   DestroyWindow(hwnd); break;
         }
