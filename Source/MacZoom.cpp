@@ -46,7 +46,11 @@
                        // the vcxproj does define.
 #include <math.h>
 #include <stdlib.h>
+#include <ole2.h>          // COM, for UI Automation; WIN32_LEAN_AND_MEAN leaves it out
+#include <uiautomation.h>
 #pragma comment(lib, "magnification.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "winmm.lib")
@@ -254,11 +258,11 @@ static const float EASE      = 0.18f;   // fraction of remaining distance per fr
 
 // ---------------------------------------------------------------- text caret
 // "Follow Text Cursor": while typing, the view follows the text caret the way macOS
-// Zoom follows keyboard focus, and moving the pointer hands the view back. The
-// caret is the system caret, which Win32 edit controls and most editors maintain for
-// accessibility tools; its owner reports every move as a caret location change, and
-// the position is read from that thread's GUI state. Applications that draw their
-// own cursor without a system caret are not followed.
+// Zoom follows keyboard focus, and moving the pointer hands the view back. Two sources
+// report it. Classic Win32 edit controls keep a system caret, whose owner reports every
+// move as a caret location change. Most current applications -- Chromium and Electron,
+// the Windows 11 Notepad, Windows Terminal, anything built on XAML -- draw their own
+// cursor and have no system caret, so UI Automation, further down, covers them.
 static HWINEVENTHOOK g_caretHook = NULL;
 static volatile bool g_onCaret   = false;    // the view currently follows the caret
 static volatile LONG g_caretX    = 0;        // caret centre, screen coordinates
@@ -266,6 +270,15 @@ static volatile LONG g_caretY    = 0;
 static volatile LONG g_anchorX   = 0;        // pointer position when the caret took over
 static volatile LONG g_anchorY   = 0;
 static const LONG    POINTER_TAKEOVER = 8;   // pixels the pointer must move to take the view back
+
+// Both sources report here, from their own threads.
+static void ReportCaret(LONG x, LONG y)
+{
+    POINT p; GetCursorPos(&p);
+    g_caretX  = x;    g_caretY  = y;
+    g_anchorX = p.x;  g_anchorY = p.y;
+    g_onCaret = true;
+}
 
 static void CALLBACK CaretProc(HWINEVENTHOOK, DWORD, HWND, LONG idObject, LONG, DWORD thread, DWORD)
 {
@@ -278,11 +291,201 @@ static void CALLBACK CaretProc(HWINEVENTHOOK, DWORD, HWND, LONG idObject, LONG, 
         POINT c = { (gti.rcCaret.left + gti.rcCaret.right) / 2,
                     (gti.rcCaret.top + gti.rcCaret.bottom) / 2 };
         ClientToScreen(gti.hwndCaret, &c);
-        POINT p; GetCursorPos(&p);
-        g_caretX  = c.x;  g_caretY  = c.y;
-        g_anchorX = p.x;  g_anchorY = p.y;
-        g_onCaret = true;
+        ReportCaret(c.x, c.y);
     }
+}
+
+// ---------------------------------------------------------------- UI Automation caret
+// The caret of the focused text element, the way Windows Magnifier follows it: a caret
+// is an empty selection, and each move raises TextSelectionChanged on that element.
+// UIA coordinates are physical pixels, the same space as the magnification transform.
+//
+// UIA wants its handlers registered from an MTA thread that pumps no window messages,
+// and a handler must not add or remove handlers itself. So UiaThread owns the client:
+// the focus handler only records the newly focused element and wakes it, and the
+// thread moves the selection handler over to that element.
+static HANDLE                g_uiaWake    = NULL;   // focus moved: re-target the handler
+static HANDLE                g_uiaThread  = NULL;
+static CRITICAL_SECTION      g_uiaLock;
+static IUIAutomationElement* g_uiaFocused = NULL;   // newest focus, guarded by g_uiaLock
+
+// The centre of the first rectangle a text range covers; false when it covers none.
+static bool RangeCentre(IUIAutomationTextRange* range, POINT* out)
+{
+    bool found = false;
+    SAFEARRAY* rects = NULL;
+    if (SUCCEEDED(range->GetBoundingRectangles(&rects)) && rects)
+    {
+        LONG lo = 0, hi = -1;
+        double* r = NULL;
+        SafeArrayGetLBound(rects, 1, &lo);
+        SafeArrayGetUBound(rects, 1, &hi);
+        if (hi - lo + 1 >= 4 && SUCCEEDED(SafeArrayAccessData(rects, (void**)&r)))
+        {
+            out->x = (LONG)(r[0] + r[2] * 0.5);
+            out->y = (LONG)(r[1] + r[3] * 0.5);
+            found = true;
+            SafeArrayUnaccessData(rects);
+        }
+        SafeArrayDestroy(rects);
+    }
+    return found;
+}
+
+// Many providers report no rectangle for an empty range; the character the caret stands
+// at stands in for it then.
+static bool CaretCentre(IUIAutomationTextRange* caret, POINT* out)
+{
+    bool found = RangeCentre(caret, out);
+    if (!found)
+    {
+        IUIAutomationTextRange* character = NULL;
+        if (SUCCEEDED(caret->Clone(&character)) && character)
+        {
+            if (SUCCEEDED(character->ExpandToEnclosingUnit(TextUnit_Character)))
+                found = RangeCentre(character, out);
+            character->Release();
+        }
+    }
+    return found;
+}
+
+// Through TextPattern2 where the provider has it, through the selection otherwise.
+static void ReportUiaCaret(IUIAutomationElement* element)
+{
+    IUIAutomationTextRange* caret = NULL;
+    IUIAutomationTextPattern2* text2 = NULL;
+    if (SUCCEEDED(element->GetCurrentPatternAs(UIA_TextPattern2Id, IID_PPV_ARGS(&text2))) && text2)
+    {
+        BOOL active = FALSE;
+        text2->GetCaretRange(&active, &caret);
+        text2->Release();
+    }
+    if (!caret)
+    {
+        IUIAutomationTextPattern* text = NULL;
+        if (SUCCEEDED(element->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&text))) && text)
+        {
+            IUIAutomationTextRangeArray* selection = NULL;
+            int count = 0;
+            if (SUCCEEDED(text->GetSelection(&selection)) && selection)
+            {
+                if (SUCCEEDED(selection->get_Length(&count)) && count > 0)
+                    selection->GetElement(0, &caret);
+                selection->Release();
+            }
+            text->Release();
+        }
+    }
+    if (caret)
+    {
+        POINT c;
+        if (CaretCentre(caret, &c)) ReportCaret(c.x, c.y);
+        caret->Release();
+    }
+}
+
+// The IUnknown both handlers share; COM objects with a reference count and nothing else.
+template <typename TInterface>
+class UiaHandler : public TInterface
+{
+public:
+    virtual ~UiaHandler() = default;
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&Refs); }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const LONG left = InterlockedDecrement(&Refs);
+        if (left == 0) delete this;
+        return (ULONG)left;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override
+    {
+        HRESULT result = E_NOINTERFACE;
+        *out = NULL;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(TInterface))
+        {
+            *out = static_cast<TInterface*>(this);
+            AddRef();
+            result = S_OK;
+        }
+        return result;
+    }
+
+private:
+    LONG Refs = 1;
+};
+
+class FocusHandler final : public UiaHandler<IUIAutomationFocusChangedEventHandler>
+{
+public:
+    HRESULT STDMETHODCALLTYPE HandleFocusChangedEvent(IUIAutomationElement* element) override
+    {
+        if (element)
+        {
+            element->AddRef();
+            EnterCriticalSection(&g_uiaLock);
+            if (g_uiaFocused) g_uiaFocused->Release();
+            g_uiaFocused = element;
+            LeaveCriticalSection(&g_uiaLock);
+            SetEvent(g_uiaWake);
+        }
+        return S_OK;
+    }
+};
+
+class SelectionHandler final : public UiaHandler<IUIAutomationEventHandler>
+{
+public:
+    HRESULT STDMETHODCALLTYPE HandleAutomationEvent(IUIAutomationElement* sender, EVENTID) override
+    {
+        if (sender && g_followText && ZoomOn()) ReportUiaCaret(sender);
+        return S_OK;
+    }
+};
+
+static DWORD WINAPI UiaThread(LPVOID)
+{
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    IUIAutomation* uia = NULL;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), NULL, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&uia))) && uia)
+    {
+        FocusHandler*         focus     = new FocusHandler();
+        SelectionHandler*     selection = new SelectionHandler();
+        IUIAutomationElement* watched   = NULL;
+        uia->AddFocusChangedEventHandler(NULL, focus);
+
+        HANDLE wait[2] = { g_uiaWake, g_quitEvt };
+        while (WaitForMultipleObjects(2, wait, FALSE, INFINITE) == WAIT_OBJECT_0)
+        {
+            EnterCriticalSection(&g_uiaLock);
+            IUIAutomationElement* next = g_uiaFocused;
+            g_uiaFocused = NULL;
+            LeaveCriticalSection(&g_uiaLock);
+            if (next)
+            {
+                if (watched)
+                {
+                    uia->RemoveAutomationEventHandler(UIA_Text_TextSelectionChangedEventId,
+                                                      watched, selection);
+                    watched->Release();
+                }
+                watched = next;
+                uia->AddAutomationEventHandler(UIA_Text_TextSelectionChangedEventId, watched,
+                                               TreeScope_Element, NULL, selection);
+                // Focus landing in a text field follows it too, before anything is typed.
+                if (g_followText && ZoomOn()) ReportUiaCaret(watched);
+            }
+        }
+
+        uia->RemoveAllEventHandlers();
+        if (watched) watched->Release();
+        focus->Release();
+        selection->Release();
+        uia->Release();
+    }
+    CoUninitialize();
+    return 0;
 }
 
 // ---------------------------------------------------------------- frame loop
@@ -713,6 +916,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     g_quitEvt   = CreateEventW(NULL, TRUE, FALSE, NULL);
     g_watchThrd = CreateThread(NULL, 0, StreamWatchThread, NULL, 0, NULL);
 
+    InitializeCriticalSection(&g_uiaLock);
+    g_uiaWake   = CreateEventW(NULL, FALSE, FALSE, NULL);
+    g_uiaThread = CreateThread(NULL, 0, UiaThread, NULL, 0, NULL);
+
     g_hook   = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, hInst, 0);
     // Out of context, so nothing is injected into other processes: the callback
     // runs on this thread, from the message loop below.
@@ -734,6 +941,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     // Release the watcher out of its INFINITE wait before joining it.
     if (g_quitEvt) SetEvent(g_quitEvt);
     if (g_watchThrd) { WaitForSingleObject(g_watchThrd, 2000); CloseHandle(g_watchThrd); }
+    if (g_uiaThread) { WaitForSingleObject(g_uiaThread, 2000); CloseHandle(g_uiaThread); }
+    if (g_uiaFocused) g_uiaFocused->Release();
     if (g_quitEvt) CloseHandle(g_quitEvt);
     if (g_thread) { WaitForSingleObject(g_thread, 1000); CloseHandle(g_thread); }
     MagSetFullscreenTransform(1.0f, 0, 0);
