@@ -30,8 +30,11 @@ application underneath, where browsers use it for page zoom.
 **Follow Mouse** determines how the view moves with the pointer: continuously, only at the
 edges, or centered on it — the same three choices as macOS. **Follow Text Cursor** makes the
 view follow the text cursor while you type, and the pointer takes over again as soon as it
-moves. It follows the system caret, which standard Windows text fields and most editors
-provide; applications that draw their own cursor without one are not followed.
+moves. It reads the cursor wherever Windows reports it: the system caret of classic text
+fields, UI Automation for current applications and browsers, and the Java Access Bridge for
+Java applications such as the JetBrains IDEs. Java reports nothing until the bridge is
+switched on, once per user, with `jabswitch -enable` from the application's Java runtime,
+followed by a restart of the application.
 
 **Zoom Keys** defines which modifier combination activates zooming via the wheel: Ctrl,
 Win, Alt and Shift can each be toggled individually. The selected combination must be held

@@ -47,10 +47,12 @@
 #include <math.h>
 #include <stdlib.h>
 #include <ole2.h>          // COM, for UI Automation; WIN32_LEAN_AND_MEAN leaves it out
+#include <oleacc.h>
 #include <uiautomation.h>
 #pragma comment(lib, "magnification.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "oleacc.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "winmm.lib")
@@ -264,6 +266,7 @@ static const float EASE      = 0.18f;   // fraction of remaining distance per fr
 // the Windows 11 Notepad, Windows Terminal, anything built on XAML -- draw their own
 // cursor and have no system caret, so UI Automation, further down, covers them.
 static HWINEVENTHOOK g_caretHook = NULL;
+static HWINEVENTHOOK g_focusHook = NULL;     // starts the Java bridge, see FocusProc
 static volatile bool g_onCaret   = false;    // the view currently follows the caret
 static volatile LONG g_caretX    = 0;        // caret centre, screen coordinates
 static volatile LONG g_caretY    = 0;
@@ -280,18 +283,31 @@ static void ReportCaret(LONG x, LONG y)
     g_onCaret = true;
 }
 
-static void CALLBACK CaretProc(HWINEVENTHOOK, DWORD, HWND, LONG idObject, LONG, DWORD thread, DWORD)
+// Chromium and Electron report a caret object of their own without keeping a system
+// caret, so the thread's caret is the first answer and the caret object the second.
+static void CALLBACK CaretProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG idObject, LONG idChild,
+                               DWORD thread, DWORD)
 {
     if (idObject != OBJID_CARET || !g_followText || !ZoomOn()) return;
 
     GUITHREADINFO gti = {};
     gti.cbSize = sizeof(gti);
+    IAccessible* caret = NULL;
+    VARIANT child;
     if (GetGUIThreadInfo(thread, &gti) && gti.hwndCaret && gti.rcCaret.bottom > gti.rcCaret.top)
     {
         POINT c = { (gti.rcCaret.left + gti.rcCaret.right) / 2,
                     (gti.rcCaret.top + gti.rcCaret.bottom) / 2 };
         ClientToScreen(gti.hwndCaret, &c);
         ReportCaret(c.x, c.y);
+    }
+    else if (SUCCEEDED(AccessibleObjectFromEvent(hwnd, idObject, idChild, &caret, &child)) && caret)
+    {
+        long x = 0, y = 0, w = 0, h = 0;
+        if (SUCCEEDED(caret->accLocation(&x, &y, &w, &h, child)) && h > 0)
+            ReportCaret(x + w / 2, y + h / 2);
+        VariantClear(&child);
+        caret->Release();
     }
 }
 
@@ -333,7 +349,8 @@ static bool RangeCentre(IUIAutomationTextRange* range, POINT* out)
 }
 
 // Many providers report no rectangle for an empty range; the character the caret stands
-// at stands in for it then.
+// at stands in for it then, or, at the end of the text where there is none, the one
+// before it.
 static bool CaretCentre(IUIAutomationTextRange* caret, POINT* out)
 {
     bool found = RangeCentre(caret, out);
@@ -345,6 +362,18 @@ static bool CaretCentre(IUIAutomationTextRange* caret, POINT* out)
             if (SUCCEEDED(character->ExpandToEnclosingUnit(TextUnit_Character)))
                 found = RangeCentre(character, out);
             character->Release();
+        }
+    }
+    if (!found)
+    {
+        IUIAutomationTextRange* before = NULL;
+        int moved = 0;
+        if (SUCCEEDED(caret->Clone(&before)) && before)
+        {
+            if (SUCCEEDED(before->MoveEndpointByUnit(TextPatternRangeEndpoint_Start,
+                                                     TextUnit_Character, -1, &moved)) && moved != 0)
+                found = RangeCentre(before, out);
+            before->Release();
         }
     }
     return found;
@@ -486,6 +515,88 @@ static DWORD WINAPI UiaThread(LPVOID)
     }
     CoUninitialize();
     return 0;
+}
+
+// ---------------------------------------------------------------- Java caret
+// Java applications -- the JetBrains IDEs among them -- show neither a system caret nor
+// UI Automation text. Their accessibility runs through the Java Access Bridge, which the
+// application must have switched on (jabswitch -enable, or an IDE's "Support screen
+// readers"). The client half, WindowsAccessBridge-64.dll, ships with every Java runtime,
+// so it is loaded from the runtime of the first Java window that takes focus rather than
+// shipped here. Its callbacks arrive through this thread's message loop.
+typedef __int64 JavaObject;   // JOBJECT64 in the bridge's own headers
+struct JavaTextInfo { int CharCount; int CaretIndex; int IndexAtPoint; };
+struct JavaTextRect { int X; int Y; int Width; int Height; };
+typedef void (*JavaCaretUpdate)(long vm, JavaObject event, JavaObject source);
+
+static bool g_jabTried = false;
+static BOOL (*g_jabTextInfo)(long, JavaObject, JavaTextInfo*, int, int) = NULL;
+static BOOL (*g_jabCaretLocation)(long, JavaObject, JavaTextRect*, int) = NULL;
+static void (*g_jabRelease)(long, JavaObject) = NULL;
+
+static void JavaCaretMoved(long vm, JavaObject event, JavaObject source)
+{
+    JavaTextInfo info = {};
+    JavaTextRect rect = {};
+    if (g_followText && ZoomOn() && g_jabTextInfo(vm, source, &info, 0, 0)
+        && g_jabCaretLocation(vm, source, &rect, info.CaretIndex) && rect.Height > 0)
+        ReportCaret(rect.X + rect.Width / 2, rect.Y + rect.Height / 2);
+    g_jabRelease(vm, event);
+    g_jabRelease(vm, source);
+}
+
+// Next to the executable in a plain Java runtime (java.exe, javaw.exe), in jbr\bin beside a
+// JetBrains IDE's bin directory.
+static HMODULE LoadJavaBridgeFor(HWND window)
+{
+    HMODULE bridge = NULL;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid))
+    {
+        wchar_t path[MAX_PATH];
+        DWORD size = MAX_PATH;
+        if (QueryFullProcessImageNameW(process, 0, path, &size))
+            if (wchar_t* name = wcsrchr(path, L'\\'))
+            {
+                *name = L'\0';
+                const wchar_t* candidates[] = { L"%s\\WindowsAccessBridge-64.dll",
+                                                L"%s\\..\\jbr\\bin\\WindowsAccessBridge-64.dll" };
+                for (const wchar_t* candidate : candidates)
+                {
+                    wchar_t dll[MAX_PATH + 64];
+                    wsprintfW(dll, candidate, path);
+                    if (!bridge) bridge = LoadLibraryW(dll);
+                }
+            }
+        CloseHandle(process);
+    }
+    return bridge;
+}
+
+// Started once, by the first Java window that takes focus.
+static void CALLBACK FocusProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG, LONG, DWORD, DWORD)
+{
+    wchar_t cls[32] = L"";
+    if (!g_jabTried && hwnd && GetClassNameW(hwnd, cls, 32) && wcsncmp(cls, L"SunAwt", 6) == 0)
+    {
+        g_jabTried = true;
+        if (HMODULE bridge = LoadJavaBridgeFor(hwnd))
+        {
+            auto run = (void (*)(void))GetProcAddress(bridge, "Windows_run");
+            auto onCaret = (void (*)(JavaCaretUpdate))GetProcAddress(bridge, "setCaretUpdateFP");
+            g_jabTextInfo = (BOOL (*)(long, JavaObject, JavaTextInfo*, int, int))
+                GetProcAddress(bridge, "getAccessibleTextInfo");
+            g_jabCaretLocation = (BOOL (*)(long, JavaObject, JavaTextRect*, int))
+                GetProcAddress(bridge, "getCaretLocation");
+            g_jabRelease = (void (*)(long, JavaObject))GetProcAddress(bridge, "releaseJavaObject");
+            if (run && onCaret && g_jabTextInfo && g_jabCaretLocation && g_jabRelease)
+            {
+                run();
+                onCaret(JavaCaretMoved);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- frame loop
@@ -850,6 +961,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
 
     LoadSettings();
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);   // for the caret objects read in CaretProc
 
     // The mouse hook and the frame loop must keep running while the machine is
     // loaded: a low-level hook that is starved stalls the pointer for everyone,
@@ -926,6 +1038,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     g_caretHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
                                   NULL, CaretProc, 0, 0,
                                   WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    g_focusHook = SetWinEventHook(EVENT_OBJECT_FOCUS, EVENT_OBJECT_FOCUS, NULL, FocusProc, 0, 0,
+                                  WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     g_thread = CreateThread(NULL, 0, FrameThread, NULL, 0, NULL);
     if (g_thread) SetThreadPriority(g_thread, THREAD_PRIORITY_ABOVE_NORMAL);
 
@@ -948,6 +1062,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     MagSetFullscreenTransform(1.0f, 0, 0);
     if (g_hook) UnhookWindowsHookEx(g_hook);
     if (g_caretHook) UnhookWinEvent(g_caretHook);
+    if (g_focusHook) UnhookWinEvent(g_focusHook);
+    CoUninitialize();
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
     if (mtx) { ReleaseMutex(mtx); CloseHandle(mtx); }
     return 0;
