@@ -27,11 +27,12 @@
 //    transforms; this is not one.
 //
 // CONTROLS
-//    Win + Wheel         zoom in / out (multiplicative, ~15% per notch)
+//    Win + Wheel         zoom in / out (multiplicative, ~9% per notch)
 //    Win + MiddleClick   reset to 1.0
-//      (Win because the key-name remap makes the Control key emit Win --
-//       see the note at the mouse hook)
-//    tray menu          enable/disable, reset, follow mouse, follow text cursor, exit
+//      (Win by default because the key-name remap makes the Control key emit
+//       Win -- see the note at the mouse hook; the keys are a tray setting)
+//    tray menu          enable/disable, reset, follow mouse, follow text cursor,
+//                       zoom keys, exit
 //
 // The zoom level is EASED toward its target every frame rather than snapped.
 // That easing is the whole point: it is what makes this continuous instead of
@@ -58,6 +59,10 @@
 #define ID_TRACK_EDGE 1011
 #define ID_TRACK_CENT 1012
 #define ID_FOLLOW_TEXT 1020
+#define ID_KEY_CTRL  1030
+#define ID_KEY_WIN   1031
+#define ID_KEY_ALT   1032
+#define ID_KEY_SHIFT 1033
 
 // How the magnified view follows the pointer. Named and ordered to match macOS
 // System Settings > Accessibility > Zoom > "When zoomed in, the screen image
@@ -70,6 +75,25 @@ static volatile bool  g_enabled = true;   // the user's tray toggle
 static volatile bool  g_running = true;
 static volatile LONG  g_track   = TRACK_CENTERED;
 static volatile bool  g_followText = false;   // tray option: follow the text caret while typing
+
+// The modifiers that, held together and with no others, turn the wheel into zoom. A tray
+// setting; Win by default, for the reason given at the mouse hook.
+enum ZoomKey { KEY_CTRL = 1, KEY_WIN = 2, KEY_ALT = 4, KEY_SHIFT = 8 };
+static volatile LONG g_zoomKeys = KEY_WIN;
+
+static const struct { LONG key; UINT id; const wchar_t* name; } ZOOM_KEYS[] = {
+    { KEY_CTRL,  ID_KEY_CTRL,  L"Ctrl"  },
+    { KEY_WIN,   ID_KEY_WIN,   L"Win"   },
+    { KEY_ALT,   ID_KEY_ALT,   L"Alt"   },
+    { KEY_SHIFT, ID_KEY_SHIFT, L"Shift" },
+};
+
+// Shift never on its own: applications use Shift+Wheel for horizontal scrolling.
+static inline bool ZoomKeysValid(LONG keys)
+{
+    return (keys & (KEY_CTRL | KEY_WIN | KEY_ALT)) != 0
+        && (keys & ~(KEY_CTRL | KEY_WIN | KEY_ALT | KEY_SHIFT)) == 0;
+}
 
 // Suppressed because a stream is running. DELIBERATELY SEPARATE from g_enabled:
 // macOS does its own screen zoom CLIENT-side, before anything reaches Windows,
@@ -92,6 +116,8 @@ static void SaveSettings(void)
         RegSetValueExW(k, L"TrackingMode", 0, REG_DWORD, (const BYTE*)&v, sizeof(v));
         DWORD text = g_followText ? 1 : 0;
         RegSetValueExW(k, L"FollowText", 0, REG_DWORD, (const BYTE*)&text, sizeof(text));
+        DWORD keys = (DWORD)g_zoomKeys;
+        RegSetValueExW(k, L"ZoomKeys", 0, REG_DWORD, (const BYTE*)&keys, sizeof(keys));
         RegCloseKey(k);
     }
 }
@@ -113,6 +139,13 @@ static void LoadSettings(void)
             && type == REG_DWORD)
         {
             g_followText = text != 0;
+        }
+        DWORD keys = 0;
+        sz = sizeof(keys);
+        if (RegQueryValueExW(k, L"ZoomKeys", NULL, &type, (BYTE*)&keys, &sz) == ERROR_SUCCESS
+            && type == REG_DWORD && ZoomKeysValid((LONG)keys))
+        {
+            g_zoomKeys = (LONG)keys;
         }
         RegCloseKey(k);
     }
@@ -142,6 +175,7 @@ static void LoadSettings(void)
 // reads the truth, RegNotifyChangeKeyValue is a genuine kernel push rather than
 // a poll, and any number of consumers can subscribe independently.
 #define WM_STREAMSTATE (WM_APP + 2)
+#define WM_MASKKEY     (WM_APP + 3)
 
 // Declared up here rather than with the other handles below, because
 // StreamWatchThread posts to it.
@@ -368,18 +402,23 @@ static DWORD WINAPI FrameThread(LPVOID)
 // ---------------------------------------------------------------- mouse hook
 static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
 {
-    // WIN, not CTRL, and that is deliberate. BasicKeySwaps2.ahk maps by key NAME
-    // so the machine matches a Mac: the Control key emits Win, Command emits
-    // Ctrl. macOS zooms on Control+scroll, so the gesture to answer is the one
-    // the Control key now produces, i.e. Win.
+    // WIN by default, not CTRL, and that is deliberate. BasicKeySwaps2.ahk maps by
+    // key NAME so the machine matches a Mac: the Control key emits Win, Command
+    // emits Ctrl. macOS zooms on Control+scroll, so the gesture to answer is the
+    // one the Control key now produces, i.e. Win.
     //
     // Binding this to VK_CONTROL had it backwards: the Mac gesture did nothing
     // while Command+scroll zoomed AND was swallowed below, silently stealing
     // browser zoom, which on a Mac is a Command shortcut and must keep working.
     //
-    // Without the AHK remap running, this needs a literal Win+scroll.
-    const bool zoomMod = (GetAsyncKeyState(VK_LWIN) & 0x8000)
-                      || (GetAsyncKeyState(VK_RWIN) & 0x8000);
+    // The keys are a tray setting (Zoom Keys), matched exactly: the configured
+    // set held, and no other modifier.
+    LONG held = 0;
+    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) held |= KEY_CTRL;
+    if ((GetAsyncKeyState(VK_LWIN) & 0x8000) || (GetAsyncKeyState(VK_RWIN) & 0x8000)) held |= KEY_WIN;
+    if (GetAsyncKeyState(VK_MENU) & 0x8000) held |= KEY_ALT;
+    if (GetAsyncKeyState(VK_SHIFT) & 0x8000) held |= KEY_SHIFT;
+    const bool zoomMod = held == g_zoomKeys;
 
     // The pointer takes the view back from the text caret once it has really
     // moved, not on the jitter of a hand resting on the mouse.
@@ -417,11 +456,13 @@ static LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam)
             if (t > ZOOM_MAX) t = ZOOM_MAX;
             g_target = t;
 
+            if (g_zoomKeys & (KEY_WIN | KEY_ALT)) PostMessageW(g_hwnd, WM_MASKKEY, 0, 0);
             return 1;                      // swallow: do not scroll the app underneath
         }
         if (wParam == WM_MBUTTONDOWN)
         {
             g_target = 1.0f;
+            if (g_zoomKeys & (KEY_WIN | KEY_ALT)) PostMessageW(g_hwnd, WM_MASKKEY, 0, 0);
             return 1;
         }
     }
@@ -433,7 +474,10 @@ static void UpdateTip()
 {
     const wchar_t* state = g_streamOff ? L"suppressed (streaming)"
                                        : (g_enabled ? L"enabled" : L"disabled");
-    wsprintfW(g_nid.szTip, L"MacZoom -- %s (Win+Wheel)", state);
+    wchar_t keys[32] = L"";
+    for (const auto& item : ZOOM_KEYS)
+        if (g_zoomKeys & item.key) { lstrcatW(keys, item.name); lstrcatW(keys, L"+"); }
+    wsprintfW(g_nid.szTip, L"MacZoom -- %s (%sWheel)", state, keys);
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
@@ -460,6 +504,14 @@ static void ShowMenu(HWND hwnd)
     AppendMenuW(m, MF_POPUP, (UINT_PTR)track, L"Follow Mouse");
     AppendMenuW(m, MF_STRING | (g_followText ? MF_CHECKED : 0), ID_FOLLOW_TEXT,
                 L"Follow Text Cursor");
+
+    // One toggle per key; a key whose toggle would leave no valid set is greyed.
+    HMENU keys = CreatePopupMenu();
+    for (const auto& item : ZOOM_KEYS)
+        AppendMenuW(keys, MF_STRING | ((g_zoomKeys & item.key) ? MF_CHECKED : 0)
+                              | (ZoomKeysValid(g_zoomKeys ^ item.key) ? 0 : MF_GRAYED),
+                    item.id, item.name);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)keys, L"Zoom Keys");
 
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
@@ -528,6 +580,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (!g_followText) g_onCaret = false;
             SaveSettings();
             break;
+        case ID_KEY_CTRL: case ID_KEY_WIN: case ID_KEY_ALT: case ID_KEY_SHIFT:
+            for (const auto& item : ZOOM_KEYS)
+                if (item.id == LOWORD(wp) && ZoomKeysValid(g_zoomKeys ^ item.key))
+                {
+                    g_zoomKeys ^= item.key;
+                    SaveSettings();
+                    UpdateTip();
+                }
+            break;
         case ID_EXIT:   DestroyWindow(hwnd); break;
         }
         return 0;
@@ -546,6 +607,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (s) g_target = 1.0f;
             UpdateTip();
         }
+        return 0;
+    }
+
+    // Win or Alt released after nothing but a swallowed wheel would open Start or an
+    // application's menu bar, because Windows saw that key pressed on its own. An
+    // unassigned key in between counts as something else -- the same trick as the
+    // {vkE8} in MacKeySwaps.ahk. Sent from here rather than from inside the hook.
+    case WM_MASKKEY:
+    {
+        INPUT mask[2] = {};
+        mask[0].type = INPUT_KEYBOARD;
+        mask[0].ki.wVk = 0xE8;
+        mask[1] = mask[0];
+        mask[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(2, mask, sizeof(INPUT));
         return 0;
     }
 

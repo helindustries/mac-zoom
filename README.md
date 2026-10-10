@@ -21,7 +21,7 @@ from stepped into continuous.
 | `Win` + Wheel | zoom in / out — multiplicative, ~9% per notch |
 | `Win` + Middle click | reset to 1.0 |
 | Tray double-click | enable / disable |
-| Tray right-click | menu: Enabled, Reset zoom, Follow Mouse, Follow Text Cursor, Exit |
+| Tray right-click | menu: Enabled, Reset zoom, Follow Mouse, Follow Text Cursor, Zoom Keys, Exit |
 
 `Win` is used instead of `Ctrl` because on a Mac keyboard remapped to match macOS, the
 Control key sends Win, and macOS zooms on Control + scroll. `Ctrl` + Wheel remains with the
@@ -32,6 +32,13 @@ edges, or centered on it — the same three choices as macOS. **Follow Text Curs
 view follow the text cursor while you type, and the pointer takes over again as soon as it
 moves. It follows the system caret, which standard Windows text fields and most editors
 provide; applications that draw their own cursor without one are not followed.
+
+**Zoom Keys** defines which modifier combination activates zooming via the wheel: Ctrl,
+Win, Alt and Shift can each be toggled individually. The selected combination must be held
+precisely, without any other modifiers. Shift alone is never used for zooming, as
+applications typically reserve Shift + Wheel for horizontal scrolling. If Win or Alt is
+included in the combination, MacZoom prevents Windows from opening the Start menu or an
+application's menu bar when the key is released after a zoom action.
 
 ## Install
 
